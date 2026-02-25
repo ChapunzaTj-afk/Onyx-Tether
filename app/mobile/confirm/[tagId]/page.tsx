@@ -47,6 +47,14 @@ export default async function MobileConfirmPage({ params, searchParams }: PagePr
       .order("name", { ascending: true }),
   ]);
 
+  const childAssetsResult = assetResult.data
+    ? await supabase
+        .from("assets")
+        .select("id, name, tag_id, status")
+        .eq("parent_asset_id", assetResult.data.id)
+        .order("name", { ascending: true })
+    : { data: [] as Array<{ id: string; name: string; tag_id: string; status: string }> };
+
   return (
     <MobileConfirmClient
       mode={mode}
@@ -62,6 +70,12 @@ export default async function MobileConfirmPage({ params, searchParams }: PagePr
           : null
       }
       sites={(sitesResult.data ?? []) as Array<{ id: string; name: string }>}
+      childAssets={(childAssetsResult.data ?? []).map((child) => ({
+        id: child.id,
+        name: child.name,
+        tagId: child.tag_id,
+        status: child.status,
+      }))}
     />
   );
 }
@@ -87,4 +101,3 @@ async function getSupabaseServerClient() {
     },
   });
 }
-

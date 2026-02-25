@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState, useTransition } from "react";
 import { QrCode, SendHorizontal } from "lucide-react";
 import { transferAsset } from "../app/actions/asset-actions";
@@ -43,8 +44,6 @@ function TransferRow({ item, workers }: { item: GearItem; workers: WorkerOption[
   const [isPending, startTransition] = useTransition();
   const [showCode, setShowCode] = useState(false);
 
-  const transferLink = `${typeof window !== "undefined" ? window.location.origin : ""}/mobile/confirm/${encodeURIComponent(item.tagId)}?mode=out`;
-
   return (
     <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4 text-white">
       <div className="flex items-start justify-between gap-3">
@@ -65,11 +64,12 @@ function TransferRow({ item, workers }: { item: GearItem; workers: WorkerOption[
 
       {showCode ? (
         <div className="mt-3 rounded-xl border border-slate-700 bg-slate-950 p-3">
-          <div className="grid h-32 place-items-center rounded-lg border border-dashed border-slate-700 bg-slate-900 text-center text-xs text-slate-400">
-            QR placeholder
-            <br />
-            {transferLink}
-          </div>
+          <Link
+            href={`/mobile/transfer?assetId=${encodeURIComponent(item.id)}&tagId=${encodeURIComponent(item.tagId)}`}
+            className="grid h-32 place-items-center rounded-lg border border-dashed border-slate-700 bg-slate-900 px-4 text-center text-xs text-slate-300"
+          >
+            Open full-screen hand-off QR
+          </Link>
         </div>
       ) : null}
 
@@ -109,4 +109,3 @@ function TransferRow({ item, workers }: { item: GearItem; workers: WorkerOption[
     </div>
   );
 }
-

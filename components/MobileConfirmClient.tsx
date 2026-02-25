@@ -6,6 +6,7 @@ import { Camera, CheckCircle2, AlertTriangle, ArrowLeft, Upload } from "lucide-r
 import { createClient } from "@supabase/supabase-js";
 import { checkoutAsset, returnAsset } from "../app/actions/asset-actions";
 import { enqueueOfflineAction, SyncIndicator } from "../lib/offline-sync";
+import KitDisplay, { type KitChildAsset } from "./KitDisplay";
 
 type SiteOption = { id: string; name: string };
 type AssetSummary = { id: string; name: string; tagId: string; status: string };
@@ -15,11 +16,13 @@ export default function MobileConfirmClient({
   tagId,
   asset,
   sites,
+  childAssets,
 }: {
   mode: "out" | "in";
   tagId: string;
   asset: AssetSummary | null;
   sites: SiteOption[];
+  childAssets: KitChildAsset[];
 }) {
   const router = useRouter();
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -27,6 +30,7 @@ export default function MobileConfirmClient({
   const [error, setError] = useState<string | null>(null);
   const [damagePhotoFile, setDamagePhotoFile] = useState<File | null>(null);
   const [damageNotes, setDamageNotes] = useState("");
+  const [selectedKitChildIds, setSelectedKitChildIds] = useState<string[]>([]);
 
   const title = asset?.name ?? `Tag ${tagId}`;
   const activeSites = useMemo(() => sites.filter((s) => s.name.toLowerCase() !== "yard"), [sites]);
@@ -178,6 +182,19 @@ export default function MobileConfirmClient({
           <p className="mt-1 font-mono text-xs text-slate-400">{tagId}</p>
         </section>
 
+        <KitDisplay
+          parentAssetName={title}
+          children={childAssets}
+          onSelectionChange={setSelectedKitChildIds}
+        />
+
+        {childAssets.length > 0 && selectedKitChildIds.length !== childAssets.length ? (
+          <div className="mt-3 rounded-xl border border-amber-300/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-100">
+            Partial kit selected ({selectedKitChildIds.length}/{childAssets.length}). Make sure missing
+            items are reported to the site manager before handoff.
+          </div>
+        ) : null}
+
         {error ? (
           <div className="mt-4 rounded-xl border border-rose-300/50 bg-rose-500/15 px-4 py-3 text-sm text-rose-200">
             {error}
@@ -281,4 +298,3 @@ export default function MobileConfirmClient({
     </main>
   );
 }
-
