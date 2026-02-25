@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import twilio from "twilio";
+import { sendRateLimitedSms } from "../../../lib/sms";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,10 +46,6 @@ export async function GET(request: NextRequest) {
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const twilioSid = process.env.TWILIO_ACCOUNT_SID;
-  const twilioAuthToken = process.env.TWILIO_AUTH_TOKEN;
-  const twilioFromNumber = process.env.TWILIO_FROM_PHONE_NUMBER;
-
   if (!supabaseUrl || !serviceRoleKey) {
     return NextResponse.json(
       { error: "Supabase service credentials are not fully configured" },
@@ -57,17 +53,9 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  if (!twilioSid || !twilioAuthToken || !twilioFromNumber) {
-    return NextResponse.json(
-      { error: "Twilio credentials are not fully configured" },
-      { status: 500 },
-    );
-  }
-
   const supabase = createClient(supabaseUrl, serviceRoleKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
-  const twilioClient = twilio(twilioSid, twilioAuthToken);
 
   const cutoff = new Date();
   cutoff.setUTCDate(cutoff.getUTCDate() - 14);
@@ -157,11 +145,11 @@ export async function GET(request: NextRequest) {
       const body = `Onyx Tether: Hi ${workerName}, the ${assetName} has been at ${siteName} for over 14 days. Please return it to the yard today or transfer it via the app to avoid penalties.`;
 
       try {
-        await twilioClient.messages.create({
-          body,
-          from: twilioFromNumber,
-          to: worker.phone_number,
-        });
+        const smsResult = await sendRateLimitedSms(worker.phone_number, body, "overdue_nag");
+        if (!smsResult.sent) {
+          skipped += 1;
+          continue;
+        }
 
         smsSent += 1;
 

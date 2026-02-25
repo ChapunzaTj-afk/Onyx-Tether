@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { cookies } from "next/headers";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
+import { sendRateLimitedSms } from "../lib/sms";
 
 type ActionResult = { success: boolean; error?: string };
 
@@ -103,7 +104,13 @@ async function findAssetById(
   return data;
 }
 
-export async function checkoutAsset(tagId: string, siteId: string): Promise<ActionResult> {
+export async function checkoutAsset(
+  tagId: string,
+  siteId: string,
+  lat?: number,
+  lng?: number,
+  accuracy?: number,
+): Promise<ActionResult> {
   try {
     if (!tagId || !siteId) {
       return { success: false, error: "tagId and siteId are required" };
@@ -154,6 +161,9 @@ export async function checkoutAsset(tagId: string, siteId: string): Promise<Acti
       p_site_id: siteId,
       p_event_at: nowIso,
       p_offline_timestamp: null,
+      p_latitude: lat ?? null,
+      p_longitude: lng ?? null,
+      p_location_accuracy_meters: accuracy ?? null,
     });
 
     if (rpcError) {
@@ -173,6 +183,9 @@ export async function checkoutBulkAsset(
   assetId: string,
   siteId: string,
   quantityToMove: number,
+  lat?: number,
+  lng?: number,
+  accuracy?: number,
 ): Promise<ActionResult> {
   try {
     if (!assetId || !siteId) {
@@ -238,6 +251,9 @@ export async function checkoutBulkAsset(
       condition: "good",
       notes: `Bulk move: ${quantityToMove} units to site.`,
       company_id: asset.company_id,
+      latitude: lat ?? null,
+      longitude: lng ?? null,
+      location_accuracy_meters: accuracy ?? null,
     });
 
     if (logError) {
@@ -259,6 +275,9 @@ export async function returnAsset(
   isDamaged: boolean,
   photoUrl?: string,
   notes?: string,
+  lat?: number,
+  lng?: number,
+  accuracy?: number,
 ): Promise<ActionResult> {
   try {
     if (!tagId) {
@@ -279,6 +298,9 @@ export async function returnAsset(
       p_notes: notes ?? null,
       p_event_at: new Date().toISOString(),
       p_offline_timestamp: null,
+      p_latitude: lat ?? null,
+      p_longitude: lng ?? null,
+      p_location_accuracy_meters: accuracy ?? null,
     });
 
     if (rpcError) {
@@ -327,6 +349,24 @@ export async function transferAsset(tagId: string, targetUserId: string): Promis
       throw new Error(err.message || "Failed to transfer asset");
     }
 
+    try {
+      const { data: recipient } = await supabase
+        .from("profiles")
+        .select("phone_number")
+        .eq("id", targetUserId)
+        .maybeSingle<{ phone_number: string | null }>();
+
+      if (recipient?.phone_number) {
+        await sendRateLimitedSms(
+          recipient.phone_number,
+          "Onyx Tether: A tool transfer is waiting for your acceptance in the app.",
+          "transfer_request",
+        );
+      }
+    } catch (smsError) {
+      console.warn("Transfer request SMS failed", smsError);
+    }
+
     revalidatePath("/dashboard");
     return { success: true };
   } catch (error) {
@@ -367,6 +407,26 @@ export async function acceptTransfer(tagId: string): Promise<ActionResult> {
       throw new Error(err.message || "Failed to accept transfer");
     }
 
+    try {
+      if (asset.assigned_user_id) {
+        const { data: previousAssignee } = await supabase
+          .from("profiles")
+          .select("phone_number")
+          .eq("id", asset.assigned_user_id)
+          .maybeSingle<{ phone_number: string | null }>();
+
+        if (previousAssignee?.phone_number) {
+          await sendRateLimitedSms(
+            previousAssignee.phone_number,
+            "Onyx Tether: Your transfer request has been accepted.",
+            "transfer_accepted",
+          );
+        }
+      }
+    } catch (smsError) {
+      console.warn("Transfer accepted SMS failed", smsError);
+    }
+
     revalidatePath("/dashboard");
     return { success: true };
   } catch (error) {
@@ -399,6 +459,26 @@ export async function rejectTransfer(tagId: string): Promise<ActionResult> {
     if (rpcError) {
       const err = rpcError as RpcError;
       throw new Error(err.message || "Failed to reject transfer");
+    }
+
+    try {
+      if (asset.assigned_user_id) {
+        const { data: previousAssignee } = await supabase
+          .from("profiles")
+          .select("phone_number")
+          .eq("id", asset.assigned_user_id)
+          .maybeSingle<{ phone_number: string | null }>();
+
+        if (previousAssignee?.phone_number) {
+          await sendRateLimitedSms(
+            previousAssignee.phone_number,
+            "Onyx Tether: Your transfer request was rejected.",
+            "transfer_rejected",
+          );
+        }
+      }
+    } catch (smsError) {
+      console.warn("Transfer rejected SMS failed", smsError);
     }
 
     revalidatePath("/dashboard");

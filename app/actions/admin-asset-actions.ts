@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { cookies } from "next/headers";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
+import { triggerWebhooks } from "../lib/webhooks";
 
 type AdminAssetActionResult = { success: boolean; error?: string };
 type UserRole = "owner" | "site_manager" | "worker";
@@ -279,6 +280,20 @@ export async function retireAsset(
       throw new Error(`Asset status updated but log insert failed: ${logError.message}`);
     }
 
+    if (reason === "scrapped") {
+      try {
+        await triggerWebhooks(owner.company_id, "asset.scrapped", {
+          assetId: asset.id,
+          companyId: owner.company_id,
+          retiredByUserId: owner.id,
+          reason,
+          occurredAt: new Date().toISOString(),
+        });
+      } catch (webhookError) {
+        console.warn("asset.scrapped webhook dispatch failed", webhookError);
+      }
+    }
+
     revalidatePath("/dashboard");
     revalidatePath("/dashboard/assets");
     return { success: true };
@@ -432,6 +447,19 @@ export async function resolveQuarantine(
 
     if (updateError) {
       throw new Error(`Failed to resolve quarantine: ${updateError.message}`);
+    }
+
+    try {
+      await triggerWebhooks(owner.company_id, "maintenance.logged", {
+        companyId: owner.company_id,
+        assetId: normalizedAssetId,
+        repairCost: normalizedRepairCost,
+        notes: normalizedNotes,
+        loggedByUserId: owner.id,
+        serviceDate: new Date().toISOString(),
+      });
+    } catch (webhookError) {
+      console.warn("maintenance.logged webhook dispatch failed", webhookError);
     }
 
     revalidatePath("/dashboard");
