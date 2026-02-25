@@ -7,6 +7,7 @@ export const dynamic = "force-dynamic";
 
 type OverdueAssetRow = {
   id: string;
+  company_id: string;
   name: string;
   assigned_user: {
     id: string;
@@ -71,6 +72,7 @@ export async function GET(request: NextRequest) {
     .select(
       `
       id,
+      company_id,
       name,
       assigned_user:profiles!assets_assigned_user_id_fkey (
         id,
@@ -94,64 +96,90 @@ export async function GET(request: NextRequest) {
   }
 
   const overdueAssets = (data ?? []) as OverdueAssetRow[];
+  const overdueAssetsByCompany = new Map<string, OverdueAssetRow[]>();
+
+  for (const asset of overdueAssets) {
+    const bucket = overdueAssetsByCompany.get(asset.company_id) ?? [];
+    bucket.push(asset);
+    overdueAssetsByCompany.set(asset.company_id, bucket);
+  }
 
   let processed = 0;
   let smsSent = 0;
   let penaltiesApplied = 0;
   let skipped = 0;
   const failures: Array<{ assetId: string; reason: string }> = [];
+  const companySummaries: Array<{
+    companyId: string;
+    overdueAssets: number;
+    processed: number;
+  }> = [];
 
-  for (const asset of overdueAssets) {
-    processed += 1;
+  for (const [companyId, companyAssets] of overdueAssetsByCompany.entries()) {
+    let companyProcessed = 0;
 
-    const worker = asset.assigned_user;
-    const site = asset.current_site;
+    // Future tenant-specific branching can live here
+    // (e.g. subscription-tier rules, weekend SMS opt-outs, quiet hours).
+    for (const asset of companyAssets) {
+      processed += 1;
+      companyProcessed += 1;
 
-    if (!worker?.id || !worker.phone_number) {
-      skipped += 1;
-      failures.push({
-        assetId: asset.id,
-        reason: "Missing assigned worker or phone number",
-      });
-      continue;
-    }
+      const worker = asset.assigned_user;
+      const site = asset.current_site;
 
-    const workerName = worker.full_name?.trim() || "there";
-    const siteName = site?.name?.trim() || "the assigned site";
-    const assetName = asset.name;
-
-    const body = `Onyx Tether: Hi ${workerName}, the ${assetName} has been at ${siteName} for over 14 days. Please return it to the yard today or transfer it via the app to avoid penalties.`;
-
-    try {
-      await twilioClient.messages.create({
-        body,
-        from: twilioFromNumber,
-        to: worker.phone_number,
-      });
-
-      smsSent += 1;
-
-      const nextNuisanceScore = (worker.nuisance_score ?? 0) + 1;
-      const { error: updateError } = await supabase
-        .from("profiles")
-        .update({ nuisance_score: nextNuisanceScore })
-        .eq("id", worker.id);
-
-      if (updateError) {
+      if (!worker?.id || !worker.phone_number) {
+        skipped += 1;
         failures.push({
           assetId: asset.id,
-          reason: `SMS sent but nuisance_score update failed: ${updateError.message}`,
+          reason: "Missing assigned worker or phone number",
         });
         continue;
       }
 
-      penaltiesApplied += 1;
-    } catch (smsError) {
-      const message =
-        smsError instanceof Error ? smsError.message : "Unknown Twilio error";
-      failures.push({ assetId: asset.id, reason: `SMS failed: ${message}` });
-      continue;
+      const workerName = worker.full_name?.trim() || "there";
+      const siteName = site?.name?.trim() || "the assigned site";
+      const assetName = asset.name;
+
+      const body = `Onyx Tether: Hi ${workerName}, the ${assetName} has been at ${siteName} for over 14 days. Please return it to the yard today or transfer it via the app to avoid penalties.`;
+
+      try {
+        await twilioClient.messages.create({
+          body,
+          from: twilioFromNumber,
+          to: worker.phone_number,
+        });
+
+        smsSent += 1;
+
+        const nextNuisanceScore = (worker.nuisance_score ?? 0) + 1;
+        const { error: updateError } = await supabase
+          .from("profiles")
+          .update({ nuisance_score: nextNuisanceScore })
+          .eq("id", worker.id)
+          .eq("company_id", companyId);
+
+        if (updateError) {
+          failures.push({
+            assetId: asset.id,
+            reason: `SMS sent but nuisance_score update failed: ${updateError.message}`,
+          });
+          continue;
+        }
+
+        penaltiesApplied += 1;
+      } catch (smsError) {
+        const message =
+          smsError instanceof Error ? smsError.message : "Unknown Twilio error";
+        failures.push({ assetId: asset.id, reason: `SMS failed: ${message}` });
+        continue;
+      }
     }
+
+    companySummaries.push({
+      companyId,
+      overdueAssets: companyAssets.length,
+      processed: companyProcessed,
+    });
   }
 
   return NextResponse.json({
@@ -165,6 +193,10 @@ export async function GET(request: NextRequest) {
       penaltiesApplied,
       skipped,
       failures: failures.length,
+    },
+    companies: {
+      totalCompanies: overdueAssetsByCompany.size,
+      summaries: companySummaries,
     },
     failures,
   });
