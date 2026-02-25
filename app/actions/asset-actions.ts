@@ -7,6 +7,7 @@ import { createServerClient, type CookieOptions } from "@supabase/ssr";
 type ActionResult = { success: boolean; error?: string };
 
 type AssetLookup = {
+  company_id?: string;
   id: string;
   status:
     | "in_yard"
@@ -19,6 +20,8 @@ type AssetLookup = {
   current_site_id: string | null;
   next_service_date: string | null;
   pending_transfer_user_id: string | null;
+  is_bulk?: boolean;
+  total_quantity?: number;
 };
 
 type RpcError = { message: string };
@@ -81,6 +84,25 @@ async function findAssetByTag(
   return data;
 }
 
+async function findAssetById(
+  assetId: string,
+  supabase: Awaited<ReturnType<typeof createSupabaseServerActionClient>>,
+) {
+  const { data, error } = await supabase
+    .from("assets")
+    .select(
+      "id, company_id, status, assigned_user_id, current_site_id, next_service_date, pending_transfer_user_id, is_bulk, total_quantity",
+    )
+    .eq("id", assetId)
+    .single<AssetLookup>();
+
+  if (error || !data) {
+    throw new Error("Asset not found");
+  }
+
+  return data;
+}
+
 export async function checkoutAsset(tagId: string, siteId: string): Promise<ActionResult> {
   try {
     if (!tagId || !siteId) {
@@ -103,11 +125,34 @@ export async function checkoutAsset(tagId: string, siteId: string): Promise<Acti
       }
     }
 
-    const now = new Date().toISOString();
+    const now = new Date();
+    const next48Hours = new Date(now.getTime() + 48 * 60 * 60 * 1000).toISOString();
+    const { data: conflictingReservation, error: reservationError } = await supabase
+      .from("reservations")
+      .select("id, site_id")
+      .eq("asset_id", asset.id)
+      .eq("status", "active")
+      .neq("site_id", siteId)
+      .lte("start_date", next48Hours)
+      .gte("end_date", now.toISOString())
+      .limit(1)
+      .maybeSingle<{ id: string; site_id: string }>();
+
+    if (reservationError) {
+      throw new Error(`Failed to validate reservations: ${reservationError.message}`);
+    }
+
+    if (conflictingReservation) {
+      throw new Error(
+        "Reservation Conflict: This asset has an approved reservation for a different site within the next 48 hours and cannot be checked out.",
+      );
+    }
+
+    const nowIso = now.toISOString();
     const { error: rpcError } = await supabase.rpc("checkout_asset_by_tag", {
       p_tag_id: tagId,
       p_site_id: siteId,
-      p_event_at: now,
+      p_event_at: nowIso,
       p_offline_timestamp: null,
     });
 
@@ -120,6 +165,91 @@ export async function checkoutAsset(tagId: string, siteId: string): Promise<Acti
     return { success: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Checkout failed";
+    return { success: false, error: message };
+  }
+}
+
+export async function checkoutBulkAsset(
+  assetId: string,
+  siteId: string,
+  quantityToMove: number,
+): Promise<ActionResult> {
+  try {
+    if (!assetId || !siteId) {
+      return { success: false, error: "assetId and siteId are required" };
+    }
+
+    if (!Number.isInteger(quantityToMove) || quantityToMove <= 0) {
+      return { success: false, error: "quantityToMove must be a positive integer" };
+    }
+
+    const { supabase, user } = await requireAuthenticatedUser();
+    const asset = await findAssetById(assetId, supabase);
+
+    if (!asset.is_bulk) {
+      return { success: false, error: "This asset is not configured as a bulk asset" };
+    }
+
+    const totalQuantity = asset.total_quantity ?? 1;
+
+    const { data: inventoryRows, error: inventoryError } = await supabase
+      .from("site_bulk_inventory")
+      .select("site_id, quantity_on_site")
+      .eq("asset_id", asset.id);
+
+    if (inventoryError) {
+      throw new Error(`Failed to read bulk inventory: ${inventoryError.message}`);
+    }
+
+    const totalOnSites = (inventoryRows ?? []).reduce(
+      (sum, row) => sum + (row.quantity_on_site ?? 0),
+      0,
+    );
+    const availableInYard = totalQuantity - totalOnSites;
+
+    if (quantityToMove > availableInYard) {
+      throw new Error(
+        `Insufficient yard quantity. Requested ${quantityToMove}, but only ${availableInYard} available.`,
+      );
+    }
+
+    const currentSiteQty =
+      (inventoryRows ?? []).find((row) => row.site_id === siteId)?.quantity_on_site ?? 0;
+
+    const { error: upsertError } = await supabase.from("site_bulk_inventory").upsert(
+      {
+        site_id: siteId,
+        asset_id: asset.id,
+        company_id: asset.company_id,
+        quantity_on_site: currentSiteQty + quantityToMove,
+      },
+      { onConflict: "site_id,asset_id" },
+    );
+
+    if (upsertError) {
+      throw new Error(`Failed to update bulk site inventory: ${upsertError.message}`);
+    }
+
+    const { error: logError } = await supabase.from("logs").insert({
+      asset_id: asset.id,
+      user_id: user.id,
+      site_id: siteId,
+      action: "bulk_checkout",
+      condition: "good",
+      notes: `Bulk move: ${quantityToMove} units to site.`,
+      company_id: asset.company_id,
+    });
+
+    if (logError) {
+      throw new Error(`Bulk inventory updated but log insert failed: ${logError.message}`);
+    }
+
+    revalidatePath("/dashboard");
+    revalidatePath("/dashboard/assets");
+    revalidatePath("/dashboard/sites");
+    return { success: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Bulk checkout failed";
     return { success: false, error: message };
   }
 }

@@ -366,3 +366,82 @@ export async function replaceTag(
     return { success: false, error: message };
   }
 }
+
+export async function resolveQuarantine(
+  assetId: string,
+  repairCost: number,
+  notes: string,
+  isScrapped: boolean,
+): Promise<AdminAssetActionResult> {
+  try {
+    const { owner, adminClient } = await requireOwnerContext();
+    const normalizedAssetId = assetId.trim();
+    const normalizedNotes = notes.trim();
+    const normalizedRepairCost = Number(repairCost);
+
+    if (!normalizedAssetId) {
+      return { success: false, error: "assetId is required" };
+    }
+
+    if (!isScrapped && (!Number.isFinite(normalizedRepairCost) || normalizedRepairCost < 0)) {
+      return { success: false, error: "repairCost must be a non-negative number" };
+    }
+
+    const { data: asset, error: assetError } = await adminClient
+      .from("assets")
+      .select("id, status")
+      .eq("id", normalizedAssetId)
+      .eq("company_id", owner.company_id)
+      .single<{ id: string; status: AssetStatus }>();
+
+    if (assetError || !asset) {
+      return { success: false, error: "Asset not found in your company" };
+    }
+
+    if (asset.status !== "quarantine") {
+      return { success: false, error: "Asset is not currently in quarantine" };
+    }
+
+    if (isScrapped) {
+      return await retireAsset(normalizedAssetId, "scrapped");
+    }
+
+    const { error: maintenanceError } = await adminClient.from("maintenance_logs").insert({
+      asset_id: normalizedAssetId,
+      logged_by_user_id: owner.id,
+      company_id: owner.company_id,
+      repair_cost: normalizedRepairCost,
+      description: normalizedNotes || "Quarantine resolved and asset returned to yard",
+      service_date: new Date().toISOString(),
+    });
+
+    if (maintenanceError) {
+      throw new Error(`Failed to create maintenance log: ${maintenanceError.message}`);
+    }
+
+    const { error: updateError } = await adminClient
+      .from("assets")
+      .update({
+        status: "in_yard",
+        assigned_user_id: null,
+        current_site_id: null,
+        pending_transfer_user_id: null,
+      })
+      .eq("id", normalizedAssetId)
+      .eq("company_id", owner.company_id);
+
+    if (updateError) {
+      throw new Error(`Failed to resolve quarantine: ${updateError.message}`);
+    }
+
+    revalidatePath("/dashboard");
+    revalidatePath("/dashboard/assets");
+    return { success: true };
+  } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : "Resolve quarantine failed";
+    return { success: false, error: message };
+  }
+}
