@@ -9,6 +9,11 @@ type OverdueAssetRow = {
   id: string;
   company_id: string;
   name: string;
+  company: {
+    id: string;
+    subscription_tier: "starter" | "pro" | "fleet";
+    timezone: string | null;
+  } | null;
   assigned_user: {
     id: string;
     full_name: string | null;
@@ -74,6 +79,11 @@ export async function GET(request: NextRequest) {
       id,
       company_id,
       name,
+      company:companies!assets_company_id_fkey!inner (
+        id,
+        subscription_tier,
+        timezone
+      ),
       assigned_user:profiles!assets_assigned_user_id_fkey (
         id,
         full_name,
@@ -86,6 +96,7 @@ export async function GET(request: NextRequest) {
     `,
     )
     .eq("status", "on_site")
+    .in("company.subscription_tier", ["pro", "fleet"])
     .lt("last_checkout_date", cutoff.toISOString());
 
   if (error) {
@@ -99,6 +110,9 @@ export async function GET(request: NextRequest) {
   const overdueAssetsByCompany = new Map<string, OverdueAssetRow[]>();
 
   for (const asset of overdueAssets) {
+    if (!asset.company || asset.company.subscription_tier === "starter") {
+      continue;
+    }
     const bucket = overdueAssetsByCompany.get(asset.company_id) ?? [];
     bucket.push(asset);
     overdueAssetsByCompany.set(asset.company_id, bucket);

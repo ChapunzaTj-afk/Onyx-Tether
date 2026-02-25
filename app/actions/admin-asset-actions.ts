@@ -290,3 +290,79 @@ export async function retireAsset(
     return { success: false, error: message };
   }
 }
+
+export async function replaceTag(
+  assetId: string,
+  newTagId: string,
+): Promise<AdminAssetActionResult> {
+  try {
+    const { owner, adminClient } = await requireOwnerContext();
+    const normalizedAssetId = assetId.trim();
+    const normalizedNewTagId = newTagId.trim();
+
+    if (!normalizedAssetId || !normalizedNewTagId) {
+      return { success: false, error: "assetId and newTagId are required" };
+    }
+
+    const { data: asset, error: assetError } = await adminClient
+      .from("assets")
+      .select("id, tag_id, current_site_id")
+      .eq("id", normalizedAssetId)
+      .eq("company_id", owner.company_id)
+      .single<{ id: string; tag_id: string; current_site_id: string | null }>();
+
+    if (assetError || !asset) {
+      return { success: false, error: "Asset not found in your company" };
+    }
+
+    const { data: existingTag, error: existingTagError } = await adminClient
+      .from("assets")
+      .select("id")
+      .eq("company_id", owner.company_id)
+      .eq("tag_id", normalizedNewTagId)
+      .neq("id", asset.id)
+      .maybeSingle<{ id: string }>();
+
+    if (existingTagError) {
+      throw new Error(`Failed to validate new tag: ${existingTagError.message}`);
+    }
+
+    if (existingTag) {
+      return { success: false, error: "newTagId is already in use for this company" };
+    }
+
+    const { error: updateError } = await adminClient
+      .from("assets")
+      .update({ tag_id: normalizedNewTagId })
+      .eq("id", asset.id)
+      .eq("company_id", owner.company_id);
+
+    if (updateError) {
+      throw new Error(`Failed to replace tag: ${updateError.message}`);
+    }
+
+    const { error: logError } = await adminClient.from("logs").insert({
+      asset_id: asset.id,
+      user_id: owner.id,
+      site_id: asset.current_site_id,
+      action: "tag_replaced",
+      condition: "good",
+      notes: `Tag replaced by owner from ${asset.tag_id} to ${normalizedNewTagId}.`,
+      company_id: owner.company_id,
+    });
+
+    if (logError) {
+      throw new Error(`Tag updated but log insert failed: ${logError.message}`);
+    }
+
+    revalidatePath("/dashboard");
+    revalidatePath("/dashboard/assets");
+    return { success: true };
+  } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : "Replace tag failed";
+    return { success: false, error: message };
+  }
+}

@@ -8,11 +8,20 @@ type ActionResult = { success: boolean; error?: string };
 
 type AssetLookup = {
   id: string;
-  status: "in_yard" | "on_site" | "quarantine" | "lost" | "retired";
+  status:
+    | "in_yard"
+    | "on_site"
+    | "quarantine"
+    | "lost"
+    | "retired"
+    | "transfer_pending";
   assigned_user_id: string | null;
   current_site_id: string | null;
   next_service_date: string | null;
+  pending_transfer_user_id: string | null;
 };
+
+type RpcError = { message: string };
 
 async function createSupabaseServerActionClient() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -59,7 +68,9 @@ async function findAssetByTag(
 ) {
   const { data, error } = await supabase
     .from("assets")
-    .select("id, status, assigned_user_id, current_site_id, next_service_date")
+    .select(
+      "id, status, assigned_user_id, current_site_id, next_service_date, pending_transfer_user_id",
+    )
     .eq("tag_id", tagId)
     .single<AssetLookup>();
 
@@ -76,7 +87,7 @@ export async function checkoutAsset(tagId: string, siteId: string): Promise<Acti
       return { success: false, error: "tagId and siteId are required" };
     }
 
-    const { supabase, user } = await requireAuthenticatedUser();
+    const { supabase } = await requireAuthenticatedUser();
     const asset = await findAssetByTag(tagId, supabase);
 
     if (asset.status !== "in_yard") {
@@ -93,32 +104,16 @@ export async function checkoutAsset(tagId: string, siteId: string): Promise<Acti
     }
 
     const now = new Date().toISOString();
-
-    const { error: updateError } = await supabase
-      .from("assets")
-      .update({
-        status: "on_site",
-        current_site_id: siteId,
-        assigned_user_id: user.id,
-        last_checkout_date: now,
-      })
-      .eq("id", asset.id)
-      .eq("status", "in_yard");
-
-    if (updateError) {
-      throw new Error(`Failed to update asset: ${updateError.message}`);
-    }
-
-    const { error: logError } = await supabase.from("logs").insert({
-      asset_id: asset.id,
-      user_id: user.id,
-      site_id: siteId,
-      action: "checkout",
-      condition: "good",
+    const { error: rpcError } = await supabase.rpc("checkout_asset_by_tag", {
+      p_tag_id: tagId,
+      p_site_id: siteId,
+      p_event_at: now,
+      p_offline_timestamp: null,
     });
 
-    if (logError) {
-      throw new Error(`Asset checked out but log insert failed: ${logError.message}`);
+    if (rpcError) {
+      const err = rpcError as RpcError;
+      throw new Error(err.message || "Failed to check out asset");
     }
 
     revalidatePath("/dashboard");
@@ -147,33 +142,18 @@ export async function returnAsset(
       return { success: false, error: "You are not assigned to this asset" };
     }
 
-    const nextStatus = isDamaged ? "quarantine" : "in_yard";
-
-    const { error: updateError } = await supabase
-      .from("assets")
-      .update({
-        status: nextStatus,
-        current_site_id: null,
-        assigned_user_id: null,
-      })
-      .eq("id", asset.id);
-
-    if (updateError) {
-      throw new Error(`Failed to update asset: ${updateError.message}`);
-    }
-
-    const { error: logError } = await supabase.from("logs").insert({
-      asset_id: asset.id,
-      user_id: user.id,
-      site_id: null,
-      action: "return",
-      condition: isDamaged ? "damaged" : "good",
-      damage_photo_url: isDamaged ? photoUrl ?? null : null,
-      notes: notes?.trim() ? notes.trim() : null,
+    const { error: rpcError } = await supabase.rpc("return_asset_by_tag", {
+      p_tag_id: tagId,
+      p_is_damaged: isDamaged,
+      p_photo_url: photoUrl ?? null,
+      p_notes: notes ?? null,
+      p_event_at: new Date().toISOString(),
+      p_offline_timestamp: null,
     });
 
-    if (logError) {
-      throw new Error(`Asset returned but log insert failed: ${logError.message}`);
+    if (rpcError) {
+      const err = rpcError as RpcError;
+      throw new Error(err.message || "Failed to return asset");
     }
 
     revalidatePath("/dashboard");
@@ -184,10 +164,10 @@ export async function returnAsset(
   }
 }
 
-export async function transferAsset(tagId: string, newWorkerId: string): Promise<ActionResult> {
+export async function transferAsset(tagId: string, targetUserId: string): Promise<ActionResult> {
   try {
-    if (!tagId || !newWorkerId) {
-      return { success: false, error: "tagId and newWorkerId are required" };
+    if (!tagId || !targetUserId) {
+      return { success: false, error: "tagId and targetUserId are required" };
     }
 
     const { supabase, user } = await requireAuthenticatedUser();
@@ -201,37 +181,100 @@ export async function transferAsset(tagId: string, newWorkerId: string): Promise
       return { success: false, error: "Asset is not currently assigned to a site" };
     }
 
-    const now = new Date().toISOString();
-
-    const { error: updateError } = await supabase
-      .from("assets")
-      .update({
-        assigned_user_id: newWorkerId,
-        last_checkout_date: now,
-      })
-      .eq("id", asset.id)
-      .eq("assigned_user_id", user.id);
-
-    if (updateError) {
-      throw new Error(`Failed to transfer asset: ${updateError.message}`);
+    if (asset.status !== "on_site") {
+      return { success: false, error: "Asset must be on site to start a transfer" };
     }
 
-    const { error: logError } = await supabase.from("logs").insert({
-      asset_id: asset.id,
-      user_id: user.id,
-      site_id: asset.current_site_id,
-      action: "transfer",
-      condition: "good",
+    const { error: rpcError } = await supabase.rpc("request_asset_transfer_by_tag", {
+      p_tag_id: tagId,
+      p_target_user_id: targetUserId,
+      p_event_at: new Date().toISOString(),
+      p_offline_timestamp: null,
     });
 
-    if (logError) {
-      throw new Error(`Asset transferred but log insert failed: ${logError.message}`);
+    if (rpcError) {
+      const err = rpcError as RpcError;
+      throw new Error(err.message || "Failed to transfer asset");
     }
 
     revalidatePath("/dashboard");
     return { success: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Transfer failed";
+    return { success: false, error: message };
+  }
+}
+
+export async function acceptTransfer(tagId: string): Promise<ActionResult> {
+  try {
+    if (!tagId) {
+      return { success: false, error: "tagId is required" };
+    }
+
+    const { supabase, user } = await requireAuthenticatedUser();
+    const asset = await findAssetByTag(tagId, supabase);
+
+    if (asset.status !== "transfer_pending") {
+      return { success: false, error: "Asset is not awaiting transfer acceptance" };
+    }
+
+    if (asset.pending_transfer_user_id !== user.id) {
+      return { success: false, error: "You are not the pending transfer recipient" };
+    }
+
+    if (!asset.current_site_id) {
+      return { success: false, error: "Asset is missing a site assignment" };
+    }
+
+    const { error: rpcError } = await supabase.rpc("accept_asset_transfer_by_tag", {
+      p_tag_id: tagId,
+      p_event_at: new Date().toISOString(),
+      p_offline_timestamp: null,
+    });
+
+    if (rpcError) {
+      const err = rpcError as RpcError;
+      throw new Error(err.message || "Failed to accept transfer");
+    }
+
+    revalidatePath("/dashboard");
+    return { success: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Accept transfer failed";
+    return { success: false, error: message };
+  }
+}
+
+export async function rejectTransfer(tagId: string): Promise<ActionResult> {
+  try {
+    if (!tagId) {
+      return { success: false, error: "tagId is required" };
+    }
+
+    const { supabase, user } = await requireAuthenticatedUser();
+    const asset = await findAssetByTag(tagId, supabase);
+
+    if (asset.status !== "transfer_pending") {
+      return { success: false, error: "Asset is not awaiting transfer acceptance" };
+    }
+
+    if (asset.pending_transfer_user_id !== user.id) {
+      return { success: false, error: "You are not the pending transfer recipient" };
+    }
+
+    const { error: rpcError } = await supabase.rpc("reject_asset_transfer_by_tag", {
+      p_tag_id: tagId,
+    });
+
+    if (rpcError) {
+      const err = rpcError as RpcError;
+      throw new Error(err.message || "Failed to reject transfer");
+    }
+
+    revalidatePath("/dashboard");
+    return { success: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Reject transfer failed";
     return { success: false, error: message };
   }
 }

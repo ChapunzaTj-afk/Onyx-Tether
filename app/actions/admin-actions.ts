@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { cookies } from "next/headers";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
+import { randomUUID } from "crypto";
 
 type AdminActionResult = { success: boolean; error?: string };
 type UserRole = "owner" | "site_manager" | "worker";
@@ -210,6 +211,73 @@ export async function deactivateUser(userId: string): Promise<AdminActionResult>
       throw error;
     }
     const message = error instanceof Error ? error.message : "Deactivation failed";
+    return { success: false, error: message };
+  }
+}
+
+export async function addSubcontractor(
+  fullName: string,
+  phoneNumber: string,
+  companyName: string,
+): Promise<AdminActionResult> {
+  const { owner, adminClient } = await requireOwnerContext();
+
+  try {
+    const normalizedName = fullName.trim();
+    const normalizedPhone = phoneNumber.trim();
+    const normalizedCompanyName = companyName.trim();
+
+    if (!normalizedName || !normalizedPhone || !normalizedCompanyName) {
+      return { success: false, error: "fullName, phoneNumber, and companyName are required" };
+    }
+
+    const syntheticEmail = `subcontractor+${randomUUID()}@onyx-tether.invalid`;
+    const syntheticPassword = randomUUID();
+
+    const { data: createdUser, error: createUserError } =
+      await adminClient.auth.admin.createUser({
+        email: syntheticEmail,
+        password: syntheticPassword,
+        email_confirm: false,
+        user_metadata: {
+          full_name: normalizedName,
+          phone_number: normalizedPhone,
+          company_name: normalizedCompanyName,
+          company_id: owner.company_id,
+          is_external: true,
+          login_disabled_reason: "external_subcontractor",
+        },
+      });
+
+    if (createUserError || !createdUser.user) {
+      throw new Error(createUserError?.message || "Failed to create subcontractor auth record");
+    }
+
+    const subcontractorId = createdUser.user.id;
+
+    const { error: insertProfileError } = await adminClient.from("profiles").insert({
+      id: subcontractorId,
+      full_name: normalizedName,
+      phone_number: normalizedPhone,
+      role: "worker",
+      company_id: owner.company_id,
+      is_active: true,
+      is_external: true,
+    });
+
+    if (insertProfileError) {
+      await adminClient.auth.admin.deleteUser(subcontractorId);
+      throw new Error(`Failed to create subcontractor profile: ${insertProfileError.message}`);
+    }
+
+    revalidatePath("/dashboard");
+    revalidatePath("/dashboard/team");
+    return { success: true };
+  } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : "Add subcontractor failed";
     return { success: false, error: message };
   }
 }
