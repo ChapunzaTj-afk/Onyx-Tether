@@ -8,9 +8,10 @@ type ActionResult = { success: boolean; error?: string };
 
 type AssetLookup = {
   id: string;
-  status: "in_yard" | "on_site" | "quarantine" | "lost";
+  status: "in_yard" | "on_site" | "quarantine" | "lost" | "retired";
   assigned_user_id: string | null;
   current_site_id: string | null;
+  next_service_date: string | null;
 };
 
 async function createSupabaseServerActionClient() {
@@ -58,7 +59,7 @@ async function findAssetByTag(
 ) {
   const { data, error } = await supabase
     .from("assets")
-    .select("id, status, assigned_user_id, current_site_id")
+    .select("id, status, assigned_user_id, current_site_id, next_service_date")
     .eq("tag_id", tagId)
     .single<AssetLookup>();
 
@@ -80,6 +81,15 @@ export async function checkoutAsset(tagId: string, siteId: string): Promise<Acti
 
     if (asset.status !== "in_yard") {
       return { success: false, error: "Asset is not currently in the yard" };
+    }
+
+    if (asset.next_service_date) {
+      const nextServiceDate = new Date(asset.next_service_date);
+      if (!Number.isNaN(nextServiceDate.getTime()) && nextServiceDate < new Date()) {
+        throw new Error(
+          "Safety Lockout: This asset is overdue for servicing and cannot be checked out.",
+        );
+      }
     }
 
     const now = new Date().toISOString();
